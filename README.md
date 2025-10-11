@@ -143,21 +143,10 @@ Returns the ETH balance (in **wei**) for a given account stored in the contract.
 
 A minimal, secure, and gas-optimized Ethereum vault for ETH deposits and withdrawals with configurable limits.
 
----
 
-## 🔍 Public Variables (Readable Directly)
-
-These state variables can be read **without gas** from any external tool or dApp:
-
-| Variable                     | Type      | Description |
-|-----------------------------|-----------|-------------|
-| `bankCap`                   | `uint256` (immutable) | Global maximum ETH capacity of the vault (in wei). |
-| `withdrawLimitPerTx`        | `uint256` (immutable) | Maximum amount (in wei) a user can withdraw in a single transaction. |
-| `totalBankFunds`            | `uint256` | Current total ETH held by the contract (in wei). |
-| `totalDepositTransactions`  | `uint256` | Cumulative count of all successful deposits. |
-| `totalWithdrawalTransactions` | `uint256` | Cumulative count of all successful withdrawals. |
 
 
 
 ---
+
 

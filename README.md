@@ -139,14 +139,11 @@ Returns the ETH balance (in **wei**) for a given account stored in the contract.
 - **`depositCount`**: Total number of successful deposits made by the user.  
 - **`withdrawalCount`**: Total number of successful withdrawals made by the user.
 
-# 🏦 Secure Vault Smart Contract
-
-A minimal, secure, and gas-optimized Ethereum vault for ETH deposits and withdrawals with configurable limits.
-
 
 
 
 
 ---
+
 
 

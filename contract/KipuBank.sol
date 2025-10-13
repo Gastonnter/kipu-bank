@@ -4,13 +4,12 @@ pragma solidity ^0.8.20;
 /// @title KipuBank - A simple vault bank with per-transaction withdrawal limits and a global capacity cap
 /// @author Gaston Terminiello
 /// @notice Allows users to deposit ETH into their personal vault and withdraw up to a per-transaction limit.
-/// @dev Implements the checks-effects-interactions pattern, custom errors, events, and a simple reentrancy guard.
-/// Follows Solidity best practices for security, readability, and efficiency as of 2025.
+/// @dev Implements CEI pattern, custom errors, events, and reentrancy guard.
 contract KipuBank {
 
-    /*
-        ERRORS
-    */
+    /*//////////////////////////////////////////////////////////////
+                              ERRORS
+    //////////////////////////////////////////////////////////////*/
 
     /// @notice Thrown when attempting a zero-value deposit.
     error ZeroDeposit();
@@ -44,9 +43,18 @@ contract KipuBank {
     /// @notice Thrown when the bank capacity is set to an invalid value (zero).
     error InvalidBankCap();
 
-    /*
-        EVENTS
-    */
+    /// @notice Thrown when an invalid function call is made to the contract.
+    error InvalidFunctionCall();
+
+    /// @notice Thrown when the withdrawal limit is invalid (zero or exceeds cap).
+    error WithdrawLimitExceedsCap();
+
+    /// @notice Thrown when an invalid address (address(0)) is provided.
+    error InvalidAddress();
+
+    /*//////////////////////////////////////////////////////////////
+                              EVENTS
+    //////////////////////////////////////////////////////////////*/
 
     /// @notice Emitted when a user deposits ETH into their vault.
     /// @param account The address of the user making the deposit.
@@ -59,10 +67,15 @@ contract KipuBank {
     /// @param amount The amount of ETH withdrawn.
     /// @param newUserBalance The user's updated balance after the withdrawal.
     event Withdrawal(address indexed account, uint256 amount, uint256 newUserBalance);
+    
+    /// @notice Emitted when funds are reconciled to match actual contract balance.
+    /// @param actualBalance The actual ETH balance of the contract.
+    /// @param recordedBalance The internal accounting balance.
+    event FundsReconciled(uint256 actualBalance, uint256 recordedBalance);
 
-    /*
-        IMMUTABLES
-    */
+    /*//////////////////////////////////////////////////////////////
+                          IMMUTABLES & CONSTANTS
+    //////////////////////////////////////////////////////////////*/
 
     /// @notice The global capacity limit for total ETH that can be deposited in the bank.
     uint256 public immutable bankCap;
@@ -70,9 +83,20 @@ contract KipuBank {
     /// @notice The maximum amount that can be withdrawn in a single transaction.
     uint256 public immutable withdrawLimitPerTx;
 
-    /*
-        STORAGE
-    */
+    // Reentrancy guard constants
+    /// @dev Constant for reentrancy guard: indicates the function has not been entered.
+    uint256 private constant NOT_ENTERED = 1;
+    
+    /// @dev Constant for reentrancy guard: indicates the function has been entered.
+    uint256 private constant ENTERED = 2;
+    
+    // Security constants
+    /// @dev Gas limit for external ETH transfers to prevent gas griefing attacks.
+    uint256 private constant TRANSFER_GAS_LIMIT = 10000;
+
+    /*//////////////////////////////////////////////////////////////
+                          STORAGE VARIABLES
+    //////////////////////////////////////////////////////////////*/
 
     /// @notice Mapping of user addresses to their ETH balances in the bank.
     mapping(address => uint256) private userBalances;
@@ -92,37 +116,30 @@ contract KipuBank {
     /// @notice The global count of all withdrawal transactions across all users.
     uint256 public totalWithdrawalTransactions;
 
-    /*
-        REENTRANCY GUARD
-    */
-
     /// @dev Status flag for the reentrancy guard: 1 indicates not entered, 2 indicates entered.
-    uint8 private reentrancyStatus;
+    uint256 private reentrancyStatus;
 
-    /// @dev Constant for reentrancy guard: indicates the function has not been entered.
-    uint8 private constant NOT_ENTERED = 1;
-
-    /// @dev Constant for reentrancy guard: indicates the function has been entered.
-    uint8 private constant ENTERED = 2;
-
-    /*
-        CONSTRUCTOR
-    */
+    /*//////////////////////////////////////////////////////////////
+                            CONSTRUCTOR
+    //////////////////////////////////////////////////////////////*/
 
     /// @notice Initializes the contract with the bank capacity and per-transaction withdrawal limit.
     /// @param _bankCap The global capacity limit for the bank (must be greater than zero).
-    /// @param _withdrawLimitPerTx The maximum withdrawal amount per transaction (can be zero, but not recommended).
+    /// @param _withdrawLimitPerTx The maximum withdrawal amount per transaction (must be greater than zero and less than cap).
     constructor(uint256 _bankCap, uint256 _withdrawLimitPerTx) {
         if (_bankCap == 0) revert InvalidBankCap();
+        if (_withdrawLimitPerTx == 0 || _withdrawLimitPerTx >= _bankCap) {
+            revert WithdrawLimitExceedsCap();
+        }
         bankCap = _bankCap;
         withdrawLimitPerTx = _withdrawLimitPerTx;
-
         reentrancyStatus = NOT_ENTERED;
     }
 
-    /*
-        MODIFIERS
-    */
+    /*//////////////////////////////////////////////////////////////
+                            MODIFIERS
+    //////////////////////////////////////////////////////////////*/
+
 
     /// @dev Prevents reentrancy attacks by locking the function during execution.
     modifier nonReentrant() {
@@ -132,58 +149,66 @@ contract KipuBank {
         reentrancyStatus = NOT_ENTERED;
     }
 
-    /*
-        PUBLIC FUNCTIONS
-    */
+    /*//////////////////////////////////////////////////////////////
+                        EXTERNAL FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
 
     /// @notice Allows a user to deposit ETH into their personal vault.
     /// @dev Checks for zero value and cap exceedance before updating state. Emits a Deposit event.
-    function deposit() external payable {
-        if (msg.value == 0) revert ZeroDeposit();
-
-        uint256 newTotalFunds = totalBankFunds + msg.value;
-        if (newTotalFunds > bankCap) {
-            uint256 remainingCapacity = bankCap - totalBankFunds;
-            revert BankCapExceeded(msg.value, remainingCapacity);
-        }
-
-        userBalances[msg.sender] += msg.value;
-        totalBankFunds = newTotalFunds;
-        userDepositCounts[msg.sender] += 1;
-        totalDepositTransactions += 1;
-
-        emit Deposit(msg.sender, msg.value, userBalances[msg.sender]);
+     function deposit() external payable nonReentrant {
+        _deposit();
     }
 
     /// @notice Allows a user to withdraw a specified amount of ETH from their vault.
     /// @param amount The amount of ETH to withdraw (must be greater than zero and within limits).
     /// @dev Follows checks-effects-interactions: validates inputs, updates state, then transfers ETH.
-    /// Protected against reentrancy. Emits a Withdrawal event.
     function withdraw(uint256 amount) external nonReentrant {
         if (amount == 0) revert ZeroWithdrawal();
-
-        if (amount > withdrawLimitPerTx) revert WithdrawAmountExceedsLimit(amount, withdrawLimitPerTx);
-
-        uint256 currentBalance = userBalances[msg.sender];
-        if (amount > currentBalance) revert InsufficientBalance(currentBalance, amount);
-
-        unchecked {
-            userBalances[msg.sender] = currentBalance - amount;
+        
+        if (amount > withdrawLimitPerTx) {
+            revert WithdrawAmountExceedsLimit(amount, withdrawLimitPerTx);
         }
-        totalBankFunds -= amount;
-        userWithdrawalCounts[msg.sender] += 1;
-        totalWithdrawalTransactions += 1;
 
-        _safeTransferETH(msg.sender, amount);
+        address sender = msg.sender;
+        uint256 currentBalance = userBalances[sender];
+        
+        if (amount > currentBalance) revert InsufficientBalance(currentBalance, amount);
+        
+        unchecked {
+            userBalances[sender] = currentBalance - amount;
+            totalBankFunds -= amount;
+            ++userWithdrawalCounts[sender];
+            ++totalWithdrawalTransactions;
+        }
 
-        emit Withdrawal(msg.sender, amount, userBalances[msg.sender]);
+        _safeTransferETH(sender, amount);
+
+        emit Withdrawal(sender, amount, userBalances[sender]);
     }
+
+    /// @notice Reconciles internal accounting with actual contract balance.
+    /// @dev Can be called by anyone if there's a discrepancy (e.g., from selfdestruct).
+    /// Only updates if actual balance is greater than recorded balance.
+    function reconcileFunds() external {
+        uint256 actualBalance = address(this).balance;
+        uint256 recordedBalance = totalBankFunds;
+
+        if (actualBalance > recordedBalance) {
+            totalBankFunds = actualBalance;
+            emit FundsReconciled(actualBalance, recordedBalance);
+        }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        EXTERNAL VIEW FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
 
     /// @notice Retrieves the current ETH balance of a specified account.
     /// @param account The address of the account to query.
     /// @return The balance of the account in wei.
     function getBalance(address account) external view returns (uint256) {
-        return userBalances[account];
+       if (account == address(0)) revert InvalidAddress();
+       return userBalances[account];
     }
 
     /// @notice Retrieves statistics for a user's vault, including balance and transaction counts.
@@ -191,52 +216,75 @@ contract KipuBank {
     /// @return balance The current ETH balance of the user.
     /// @return depositCount The number of deposit transactions made by the user.
     /// @return withdrawalCount The number of withdrawal transactions made by the user.
-    function getUserStats(address account) external view returns (uint256 balance, uint256 depositCount, uint256 withdrawalCount) {
+    function getUserStats(address account)
+     external
+     view
+     returns (
+        uint256 balance, 
+        uint256 depositCount,
+        uint256 withdrawalCount
+        ) 
+    {
+        if (account == address(0)) revert InvalidAddress();
         balance = userBalances[account];
         depositCount = userDepositCounts[account];
         withdrawalCount = userWithdrawalCounts[account];
     }
 
-    /*
-        PRIVATE HELPERS
-    */
+     /*//////////////////////////////////////////////////////////////
+                        PRIVATE FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
 
     /// @dev Safely transfers ETH to a recipient using a low-level call.
     /// @param to The recipient address.
     /// @param amount The amount of ETH to transfer.
-    /// @return data The return data from the call (if any).
-    function _safeTransferETH(address to, uint256 amount) private returns (bytes memory data) {
-        (bool success, bytes memory returnData) = to.call{value: amount}("");
+    /// @notice Gas limit prevents griefing attacks from malicious receive() functions.
+    function _safeTransferETH(address to, uint256 amount) private {
+        if (to == address(0)) revert InvalidAddress();
+        (bool success,) = to.call{value: amount, gas: TRANSFER_GAS_LIMIT}("");
         if (!success) revert TransferFailed(to, amount);
-        return returnData;
     }
 
-    /*
-        FALLBACK / RECEIVE
-    */
+    /// @dev Internal deposit logic used by both deposit() and receive().
+    /// @notice Caller MUST apply nonReentrant modifier.
+    function _deposit() private {
+        uint256 amount = msg.value;
 
-    /// @notice Handles direct ETH transfers to the contract as deposits.
-    /// @dev Mirrors the deposit() function logic for consistency.
-    receive() external payable {
-        if (msg.value == 0) revert ZeroDeposit();
+        if (amount == 0) revert ZeroDeposit();
 
-        uint256 newTotalFunds = totalBankFunds + msg.value;
+        // Check capacity before accepting deposit
+        uint256 newTotalFunds = totalBankFunds + amount;
         if (newTotalFunds > bankCap) {
             uint256 remainingCapacity = bankCap - totalBankFunds;
-            revert BankCapExceeded(msg.value, remainingCapacity);
+            revert BankCapExceeded(amount, remainingCapacity);
         }
 
-        userBalances[msg.sender] += msg.value;
+        // Update user balance and total funds
+        address sender = msg.sender;
+        userBalances[sender] += amount;
         totalBankFunds = newTotalFunds;
-        userDepositCounts[msg.sender] += 1;
-        totalDepositTransactions += 1;
 
-        emit Deposit(msg.sender, msg.value, userBalances[msg.sender]);
+        // Update transaction counters (safe from overflow in unchecked)
+        unchecked {
+            ++userDepositCounts[sender];
+            ++totalDepositTransactions;
+        }
+
+        emit Deposit(sender, amount, userBalances[sender]);
     }
 
+   /*//////////////////////////////////////////////////////////////
+                        FALLBACK / RECEIVE
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Handles direct ETH transfers to the contract as deposits.
+    /// @dev Calls internal _deposit() function with reentrancy protection.
+    receive() external payable nonReentrant {
+       _deposit();
+    }
     /// @notice Reverts any non-standard calls to the contract.
     /// @dev Ensures only defined functions or receive() can be called.
     fallback() external payable {
-        revert();
+        revert InvalidFunctionCall();
     }
 }

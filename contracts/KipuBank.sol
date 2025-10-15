@@ -8,6 +8,77 @@ pragma solidity ^0.8.20;
 contract KipuBank {
 
     /*//////////////////////////////////////////////////////////////
+                          IMMUTABLES & CONSTANTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice The global capacity limit for total ETH that can be deposited in the bank.
+    uint256 public immutable bankCap;
+
+    /// @notice The maximum amount that can be withdrawn in a single transaction.
+    uint256 public immutable withdrawLimitPerTx;
+
+    // Reentrancy guard constants
+    /// @dev Constant for reentrancy guard: indicates the function has not been entered.
+    uint256 private constant NOT_ENTERED = 1;
+    
+    /// @dev Constant for reentrancy guard: indicates the function has been entered.
+    uint256 private constant ENTERED = 2;
+    
+    // Security constants
+    /// @dev Gas limit for external ETH transfers to prevent gas griefing attacks.
+    uint256 private constant TRANSFER_GAS_LIMIT = 10000;
+
+    /*//////////////////////////////////////////////////////////////
+                          STORAGE VARIABLES
+    //////////////////////////////////////////////////////////////*/
+
+
+    /// @notice The total amount of ETH currently held in the bank (sum of all user balances).
+    uint256 public totalBankFunds;
+
+    /// @notice The global count of all deposit transactions across all users.
+    uint256 public totalDepositTransactions;
+
+    /// @notice The global count of all withdrawal transactions across all users.
+    uint256 public totalWithdrawalTransactions;
+
+    /// @dev Status flag for the reentrancy guard: 1 indicates not entered, 2 indicates entered.
+    uint256 private reentrancyStatus;
+
+    /*//////////////////////////////////////////////////////////////
+                              MAPPING
+    //////////////////////////////////////////////////////////////*/
+    /// @notice Mapping of user addresses to their ETH balances in the bank.
+    mapping(address => uint256) private userBalances;
+
+    /// @notice Mapping of user addresses to the count of their deposit transactions.
+    mapping(address => uint256) private userDepositCounts;
+
+    /// @notice Mapping of user addresses to the count of their withdrawal transactions.
+    mapping(address => uint256) private userWithdrawalCounts;
+
+    /*//////////////////////////////////////////////////////////////
+                              EVENTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Emitted when a user deposits ETH into their vault.
+    /// @param account The address of the user making the deposit.
+    /// @param amount The amount of ETH deposited.
+    /// @param newUserBalance The user's updated balance after the deposit.
+    event Deposit(address indexed account, uint256 amount, uint256 newUserBalance);
+
+    /// @notice Emitted when a user withdraws ETH from their vault.
+    /// @param account The address of the user making the withdrawal.
+    /// @param amount The amount of ETH withdrawn.
+    /// @param newUserBalance The user's updated balance after the withdrawal.
+    event Withdrawal(address indexed account, uint256 amount, uint256 newUserBalance);
+    
+    /// @notice Emitted when funds are reconciled to match actual contract balance.
+    /// @param actualBalance The actual ETH balance of the contract.
+    /// @param recordedBalance The internal accounting balance.
+    event FundsReconciled(uint256 actualBalance, uint256 recordedBalance);
+
+    /*//////////////////////////////////////////////////////////////
                               ERRORS
     //////////////////////////////////////////////////////////////*/
 
@@ -52,72 +123,7 @@ contract KipuBank {
     /// @notice Thrown when an invalid address (address(0)) is provided.
     error InvalidAddress();
 
-    /*//////////////////////////////////////////////////////////////
-                              EVENTS
-    //////////////////////////////////////////////////////////////*/
 
-    /// @notice Emitted when a user deposits ETH into their vault.
-    /// @param account The address of the user making the deposit.
-    /// @param amount The amount of ETH deposited.
-    /// @param newUserBalance The user's updated balance after the deposit.
-    event Deposit(address indexed account, uint256 amount, uint256 newUserBalance);
-
-    /// @notice Emitted when a user withdraws ETH from their vault.
-    /// @param account The address of the user making the withdrawal.
-    /// @param amount The amount of ETH withdrawn.
-    /// @param newUserBalance The user's updated balance after the withdrawal.
-    event Withdrawal(address indexed account, uint256 amount, uint256 newUserBalance);
-    
-    /// @notice Emitted when funds are reconciled to match actual contract balance.
-    /// @param actualBalance The actual ETH balance of the contract.
-    /// @param recordedBalance The internal accounting balance.
-    event FundsReconciled(uint256 actualBalance, uint256 recordedBalance);
-
-    /*//////////////////////////////////////////////////////////////
-                          IMMUTABLES & CONSTANTS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice The global capacity limit for total ETH that can be deposited in the bank.
-    uint256 public immutable bankCap;
-
-    /// @notice The maximum amount that can be withdrawn in a single transaction.
-    uint256 public immutable withdrawLimitPerTx;
-
-    // Reentrancy guard constants
-    /// @dev Constant for reentrancy guard: indicates the function has not been entered.
-    uint256 private constant NOT_ENTERED = 1;
-    
-    /// @dev Constant for reentrancy guard: indicates the function has been entered.
-    uint256 private constant ENTERED = 2;
-    
-    // Security constants
-    /// @dev Gas limit for external ETH transfers to prevent gas griefing attacks.
-    uint256 private constant TRANSFER_GAS_LIMIT = 10000;
-
-    /*//////////////////////////////////////////////////////////////
-                          STORAGE VARIABLES
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Mapping of user addresses to their ETH balances in the bank.
-    mapping(address => uint256) private userBalances;
-
-    /// @notice Mapping of user addresses to the count of their deposit transactions.
-    mapping(address => uint256) private userDepositCounts;
-
-    /// @notice Mapping of user addresses to the count of their withdrawal transactions.
-    mapping(address => uint256) private userWithdrawalCounts;
-
-    /// @notice The total amount of ETH currently held in the bank (sum of all user balances).
-    uint256 public totalBankFunds;
-
-    /// @notice The global count of all deposit transactions across all users.
-    uint256 public totalDepositTransactions;
-
-    /// @notice The global count of all withdrawal transactions across all users.
-    uint256 public totalWithdrawalTransactions;
-
-    /// @dev Status flag for the reentrancy guard: 1 indicates not entered, 2 indicates entered.
-    uint256 private reentrancyStatus;
 
     /*//////////////////////////////////////////////////////////////
                             CONSTRUCTOR
@@ -150,7 +156,7 @@ contract KipuBank {
     }
 
     /*//////////////////////////////////////////////////////////////
-                        EXTERNAL FUNCTIONS
+                        EXTERNAL PAYABLE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Allows a user to deposit ETH into their personal vault.
@@ -199,38 +205,6 @@ contract KipuBank {
         }
     }
 
-    /*//////////////////////////////////////////////////////////////
-                        EXTERNAL VIEW FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Retrieves the current ETH balance of a specified account.
-    /// @param account The address of the account to query.
-    /// @return The balance of the account in wei.
-    function getBalance(address account) external view returns (uint256) {
-       if (account == address(0)) revert InvalidAddress();
-       return userBalances[account];
-    }
-
-    /// @notice Retrieves statistics for a user's vault, including balance and transaction counts.
-    /// @param account The address of the account to query.
-    /// @return balance The current ETH balance of the user.
-    /// @return depositCount The number of deposit transactions made by the user.
-    /// @return withdrawalCount The number of withdrawal transactions made by the user.
-    function getUserStats(address account)
-     external
-     view
-     returns (
-        uint256 balance, 
-        uint256 depositCount,
-        uint256 withdrawalCount
-        ) 
-    {
-        if (account == address(0)) revert InvalidAddress();
-        balance = userBalances[account];
-        depositCount = userDepositCounts[account];
-        withdrawalCount = userWithdrawalCounts[account];
-    }
-
      /*//////////////////////////////////////////////////////////////
                         PRIVATE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -272,6 +246,39 @@ contract KipuBank {
 
         emit Deposit(sender, amount, userBalances[sender]);
     }
+
+    /*//////////////////////////////////////////////////////////////
+                        EXTERNAL VIEW FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Retrieves the current ETH balance of a specified account.
+    /// @param account The address of the account to query.
+    /// @return The balance of the account in wei.
+    function getBalance(address account) external view returns (uint256) {
+       if (account == address(0)) revert InvalidAddress();
+       return userBalances[account];
+    }
+
+    /// @notice Retrieves statistics for a user's vault, including balance and transaction counts.
+    /// @param account The address of the account to query.
+    /// @return balance The current ETH balance of the user.
+    /// @return depositCount The number of deposit transactions made by the user.
+    /// @return withdrawalCount The number of withdrawal transactions made by the user.
+    function getUserStats(address account)
+     external
+     view
+     returns (
+        uint256 balance, 
+        uint256 depositCount,
+        uint256 withdrawalCount
+        ) 
+    {
+        if (account == address(0)) revert InvalidAddress();
+        balance = userBalances[account];
+        depositCount = userDepositCounts[account];
+        withdrawalCount = userWithdrawalCounts[account];
+    }
+
 
    /*//////////////////////////////////////////////////////////////
                         FALLBACK / RECEIVE
